@@ -1,3 +1,11 @@
+import logging
+import os
+import requests
+import yaml
+import zipfile
+
+from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 
 from rest_framework import permissions, status
@@ -10,16 +18,24 @@ from rest_framework_expiring_authtoken.authentication import (ExpiringTokenAuthe
 from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 
 from accounts.permissions import HasVerifiedEmail
-from base.utils import paginated_queryset
+from base.utils import paginated_queryset, get_model_object
 from hosts.models import ChallengeHost, ChallengeHostTeam
 from hosts.utils import get_challenge_host_teams_for_user
 from participants.models import Participant, ParticipantTeam
 from participants.utils import get_participant_teams_for_user, has_user_participated_in_challenge
 
-
-from .models import Challenge, ChallengePhase, ChallengePhaseSplit
+from .models import Challenge, ChallengePhase, ChallengePhaseSplit, ChallengeConfiguration, DatasetSplit, Leaderboard
 from .permissions import IsChallengeCreator
-from .serializers import ChallengeSerializer, ChallengePhaseSerializer, ChallengePhaseSplitSerializer
+from .serializers import (ChallengeConfigurationSerializer,
+                          ChallengePhaseSerializer,
+                          ChallengePhaseSplitSerializer,
+                          ChallengeSerializer,
+                          DatasetSplitSerializer,
+                          LeaderboardSerializer,
+                          ZipConfigurationChallengeSerializer,
+                          ZipFileCreateChallengePhaseSplitSerializer,)
+
+logger = logging.getLogger(__name__)
 
 
 @throttle_classes([UserRateThrottle])
@@ -340,3 +356,339 @@ def challenge_phase_split_list(request, challenge_pk):
     serializer = ChallengePhaseSplitSerializer(result_page, many=True)
     response_data = serializer.data
     return paginator.get_paginated_response(response_data)
+
+
+@throttle_classes([UserRateThrottle])
+@api_view(['POST'])
+@permission_classes((permissions.IsAuthenticated, HasVerifiedEmail))
+@authentication_classes((ExpiringTokenAuthentication,))
+def create_challenge_using_zip_file(request):
+    """
+    Creates a challenge using a zip file.
+    """
+    try:
+        user = User.objects.get(pk=request.user.pk)
+    except:
+        response_data = {'error': 'You are not an authenticated user'}
+        return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            challenge_host_team = ChallengeHostTeam.objects.get(created_by=user)
+        except:
+            response_data = {'error': 'Challenge Host Team for {} does not exist'.format(str(user))}
+            return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+
+    serializer = ChallengeConfigurationSerializer(data=request.data, context={'user': user, 'request': request})
+    if serializer.is_valid():
+        uploaded_zip_file = serializer.save()
+        uploaded_zip_file_path = serializer.data['zip_configuration']
+    else:
+        response_data = serializer.errors
+        return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        response = requests.get(uploaded_zip_file_path, stream=True)
+    except:
+        response_data = {'error': 'Your file is not found. Please upload the file again.'}
+        return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+    zip_file_download_base_location = '/tmp/'
+
+    zip_file_download_location = os.path.join(zip_file_download_base_location + 'zip_challenge.zip')
+
+    if response and response.status_code == 200:
+        with open(str(zip_file_download_location), 'w') as f:
+            f.write(response.content)
+
+        zip_file_extract_location = '/tmp/'
+        zip_ref = zipfile.ZipFile(zip_file_download_location, 'r')
+        zip_ref.extractall(zip_file_extract_location)
+        zip_ref.close()
+
+        for name in zip_ref.namelist():
+            if name.endswith('.yaml') or name.endswith('.yml'):
+                yaml_file = name
+
+        if yaml_file:
+            with open(zip_file_extract_location + str(yaml_file), "r") as stream:
+                try:
+                    yaml_file_content = yaml.load(stream)
+                except yaml.YAMLError:
+                    response_data = {'error': 'The yaml file format is not correct.'}
+                    return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+        else:
+            response_data = {'error': 'There is no yml file in the zip.'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        image = yaml_file_content['image']
+        if image.endswith('.jpg') or image.endswith('.jpeg') or image.endswith('png'):
+            challenge_image_file_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
+                                                                                 str(yaml_file_content['image'])))
+        else:
+            response_data = {'error': 'Image path is not correct'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        evaluation_script = yaml_file_content['evaluation_script']
+        if len(evaluation_script) > 0:
+            challenge_evaluation_script_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
+                                                                                        str(evaluation_script)))
+        else:
+            response_data = {'error': 'Evaluation script path is not correct'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        if os.path.isfile(challenge_image_file_path) and os.path.isfile(challenge_evaluation_script_path):
+            image = SimpleUploadedFile(str(yaml_file_content['image']),
+                                       challenge_image_file_path,
+                                       content_type='image/jpeg')
+            evaluation_script = SimpleUploadedFile(str(yaml_file_content['evaluation_script']),
+                                                   challenge_evaluation_script_path,
+                                                   content_type='text/plain')
+        else:
+            response_data = {'error': 'The image or the evaluation script file does not exist'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        serializer = ZipConfigurationChallengeSerializer(data=yaml_file_content,
+                                                         context={'request': request,
+                                                                  'challenge_host_team': challenge_host_team})
+        if serializer.is_valid():
+            challenge = serializer.save()
+            try:
+                challenge_obj = Challenge.objects.get(pk=challenge.pk)
+            except:
+                response_data = {'error': 'Challenge {} does not exist'.format(challenge.pk)}
+                challenge.delete()
+                return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                challenge_obj.image = image
+                challenge_obj.evaluation_script = evaluation_script
+                challenge_obj.save()
+            except:
+                challenge.delete()
+                response_data = {'error': 'The image and evaluation script could not be uploaded.'}
+                return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+        else:
+            response_data = serializer.errors
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        # Create Leaderboard
+
+        yaml_file_content_of_leaderboard = yaml_file_content['leaderboard']
+        key = 0
+        leaderboard_ids = []
+        try:
+            while key < len(yaml_file_content_of_leaderboard):
+                yaml_file_leaderboard_list = yaml_file_content_of_leaderboard[key:key+2]
+                key += 2
+                data = {}
+                for value in yaml_file_leaderboard_list:
+                    data.update(value)
+                serializer = LeaderboardSerializer(data=data)
+                if serializer.is_valid():
+                    leaderboard = serializer.save()
+                    leaderboard_ids.append(leaderboard.pk)
+                else:
+                    challenge_obj = get_model_object(Challenge)
+                    challenge_obj(challenge.pk).delete()
+                    for i in leaderboard_ids:
+                        leaderboard_obj = get_model_object(Leaderboard)
+                        leaderboard_obj(i).delete()
+                    response_data = serializer.errors
+                    return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+        except:
+            challenge_obj = get_model_object(Challenge)
+            challenge_obj(challenge.pk).delete()
+            response_data = {'error': 'The yml file is not correct'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        # Create Challenge Phase
+
+        yaml_file_content_of_challenge_phase = yaml_file_content['challenge_phases']
+        key = 0
+        challenge_phase_ids = []
+        try:
+            while key < len(yaml_file_content_of_challenge_phase):
+                yaml_file_challenge_phase_list = yaml_file_content_of_challenge_phase[key:key+11]
+                data = {}
+                for value in yaml_file_challenge_phase_list:
+                    data.update(value)
+                serializer = ChallengePhaseSerializer(data=data, context={'challenge': challenge})
+                if serializer.is_valid():
+                    challenge_phase = serializer.save()
+                    challenge_phase_ids.append(challenge_phase.pk)
+                    try:
+                        challenge_phase = ChallengePhase.objects.get(pk=challenge_phase.pk)
+                    except:
+                        challenge_obj = get_model_object(Challenge)
+                        challenge_obj(challenge.pk).delete()
+                        for i in leaderboard_ids:
+                            leaderboard_obj = get_model_object(Leaderboard)
+                            leaderboard_obj(i).delete()
+                        for i in challenge_phase_ids:
+                            challenge_phase_obj = get_model_object(ChallengePhase)
+                            challenge_phase_obj(i).delete()
+                        response_data = {'error': 'Challenge phase {} does not exist'.format(challenge_phase.pk)}
+                        return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+                    test_annotation_file = yaml_file_challenge_phase_list[7]['test_annotation_file']
+                    if len(yaml_file_challenge_phase_list[7]['test_annotation_file']) > 0:
+                        test_annotation_file_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
+                                                                                             str(test_annotation_file)))
+                    else:
+                        challenge_obj = get_model_object(Challenge)
+                        challenge_obj(challenge.pk).delete()
+                        for i in leaderboard_ids:
+                            leaderboard_obj = get_model_object(Leaderboard)
+                            leaderboard_obj(i).delete()
+                        for i in challenge_phase_ids:
+                            challenge_phase_obj = get_model_object(ChallengePhase)
+                            challenge_phase_obj(i).delete()
+                        response_data = {'error': 'No path for test annotation file'}
+                        return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+                    if os.path.isfile(test_annotation_file_path):
+                        challenge_phase.test_annotation = SimpleUploadedFile(str(data['test_annotation_file']),
+                                                                             test_annotation_file_path,
+                                                                             content_type='text/plain')
+                        challenge_phase.save()
+                    else:
+                        challenge_obj = get_model_object(Challenge)
+                        challenge_obj(challenge.pk).delete()
+                        for i in leaderboard_ids:
+                            leaderboard_obj = get_model_object(Leaderboard)
+                            leaderboard_obj(i).delete()
+                        response_data = {'error': 'Test annotation file is missing'}
+                        return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+                else:
+                    challenge_obj = get_model_object(Challenge)
+                    challenge_obj(challenge.pk).delete()
+                    for i in leaderboard_ids:
+                        leaderboard_obj = get_model_object(Leaderboard)
+                        leaderboard_obj(i).delete()
+                    response_data = serializer.errors
+                    return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+                key += 11
+        except:
+            challenge_obj = get_model_object(Challenge)
+            challenge_obj(challenge.pk).delete()
+            for i in leaderboard_ids:
+                leaderboard_obj = get_model_object(Leaderboard)
+                leaderboard_obj(i).delete()
+            response_data = {'error': 'The yml file configuration is not correct'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        # Create Dataset Splits
+
+        yaml_file_content_of_dataset_split = yaml_file_content['dataset_splits']
+        key = 0
+        dataset_split_ids = []
+        try:
+            while key < len(yaml_file_content_of_dataset_split):
+                yaml_file_dataset_split_list = yaml_file_content_of_dataset_split[key:key+3]
+                key += 3
+                data = {}
+                for value in yaml_file_dataset_split_list:
+                    data.update(value)
+
+                serializer = DatasetSplitSerializer(data=data)
+                if serializer.is_valid():
+                    dataset_split = serializer.save()
+                    dataset_split_ids.append(dataset_split.pk)
+                else:
+                    challenge_obj = get_model_object(Challenge)
+                    challenge_obj(challenge.pk).delete()
+                    for i in leaderboard_ids:
+                        leaderboard_obj = get_model_object(Leaderboard)
+                        leaderboard_obj(i).delete()
+                    for i in dataset_split_ids:
+                        dataset_split_obj = get_model_object(DatasetSplit)
+                        dataset_split_obj(i).delete()
+                    response_data = serializer.errors
+                    return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+        except:
+            challenge_obj = get_model_object(Challenge)
+            challenge_obj(challenge.pk).delete()
+            for i in leaderboard_ids:
+                leaderboard_obj = get_model_object(Leaderboard)
+                leaderboard_obj(i).delete()
+            for i in challenge_phase_ids:
+                challenge_phase_obj = get_model_object(ChallengePhase)
+                challenge_phase_obj(i).delete()
+            response_data = {'error': 'The yml file is not correct'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+        # Create Challenge Phase Splits
+
+        yaml_file_content_of_challenge_phase_splits = yaml_file_content['challenge_phase_splits']
+        key = 0
+        challenge_phase_split_ids = []
+        try:
+            while key < len(yaml_file_content_of_challenge_phase_splits):
+                yaml_file_challenge_phase_split_list = yaml_file_content_of_challenge_phase_splits[key:key+4]
+                key += 4
+                temp_data = {}
+                for value in yaml_file_challenge_phase_split_list:
+                    temp_data.update(value)
+
+                challenge_phase = str(challenge_phase_ids[int(temp_data['challenge_phase_id'])-1])
+                leaderboard = str(leaderboard_ids[int(temp_data['leaderboard_id'])-1])
+                dataset_split = str(dataset_split_ids[int(temp_data['dataset_split_id'])-1])
+                visibility = int(temp_data['visibility'])
+
+                data = {
+                    'challenge_phase': challenge_phase,
+                    'leaderboard': leaderboard,
+                    'dataset_split': dataset_split,
+                    'visibility': visibility
+                }
+
+                serializer = ZipFileCreateChallengePhaseSplitSerializer(data=data)
+                if serializer.is_valid():
+                    challenge_phase_split = serializer.save()
+                    challenge_phase_split_ids.append(challenge_phase_split)
+                else:
+                    challenge_obj = get_model_object(Challenge)
+                    challenge_obj(challenge.pk).delete()
+                    for i in leaderboard_ids:
+                        leaderboard_obj = get_model_object(Leaderboard)
+                        leaderboard_obj(i).delete()
+                    for i in challenge_phase_ids:
+                        challenge_phase_obj = get_model_object(ChallengePhase)
+                        challenge_phase_obj(i).delete()
+                    for i in dataset_split_ids:
+                        dataset_split_obj = get_model_object(DatasetSplit)
+                        dataset_split_obj(i).delete()
+                    for i in challenge_phase_split_ids:
+                        challenge_phase_split_obj = get_model_object(ChallengePhaseSplit)
+                        challenge_phase_split_obj(i).delete()
+
+                    response_data = serializer.errors
+                    return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+        except:
+            challenge_obj = get_model_object(Challenge)
+            challenge_obj(challenge.pk).delete()
+            for i in leaderboard_ids:
+                leaderboard_obj = get_model_object(Leaderboard)
+                leaderboard_obj(i).delete()
+            for i in dataset_split_ids:
+                dataset_split_obj = get_model_object(DatasetSplit)
+                dataset_split_obj(i).delete()
+            response_data = {'error': 'The yml file is not correct'}
+            return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+    try:
+        zip_config = ChallengeConfiguration.objects.get(pk=uploaded_zip_file.pk)
+    except:
+        response_data = {'error': 'Zip Challenge object does not exist'}
+        return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+    if zip_config:
+        zip_config.challenge = challenge
+        zip_config.save()
+        response_data = {'success': 'The Challenge is successfully created'}
+        return Response(response_data, status=status.HTTP_200_OK)
+    else:
+        response_data = {'error': 'Error in creating a challenge. Please try again'}
+        return Response(response_data, status=status.HTTP_406_NOT_ACCEPTABLE)
+
+    try:
+        os.remove(zip_file_download_location)
+        logger.info('Zip folder is removed')
+    except:
+        logger.info('Zip folder not removed')

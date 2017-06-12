@@ -25,4 +25,6 @@ urlpatterns = [
         name='get_challenges_based_on_teams'),
     url(r'(?P<challenge_pk>[0-9]+)/challenge_phase_split$', views.challenge_phase_split_list,
         name='challenge_phase_split_list'),
+    url(r'zip/$', views.create_challenge_using_zip_file,
+        name='create_challenge_using_zip_file'),
 ]
