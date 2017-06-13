@@ -1,10 +1,11 @@
 import logging
 import os
 import requests
+import tempfile
 import yaml
 import zipfile
 
-from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.files import File
 from django.db import transaction
 from django.utils import timezone
 
@@ -384,129 +385,109 @@ def create_challenge_using_zip_file(request):
         with transaction.atomic():
             response = requests.get(uploaded_zip_file_path, stream=True)
 
-            zip_file_download_base_location = '/tmp/'
+            # All files download and extract location.
+            BASE_LOCATION = tempfile.mkdtemp()
 
-            zip_file_download_location = os.path.join(zip_file_download_base_location + 'zip_challenge.zip')
+            CHALLENGE_ZIP_DOWNLOAD_LOCATION = os.path.join('{}/zip_challenge.zip'.format(BASE_LOCATION))
 
             if response and response.status_code == 200:
-                with open(str(zip_file_download_location), 'w') as f:
+                with open(str(CHALLENGE_ZIP_DOWNLOAD_LOCATION), 'w') as f:
                     f.write(response.content)
 
-                zip_file_extract_location = '/tmp/'
-                zip_ref = zipfile.ZipFile(zip_file_download_location, 'r')
-                zip_ref.extractall(zip_file_extract_location)
+                # Extract zip file 
+                zip_ref = zipfile.ZipFile(CHALLENGE_ZIP_DOWNLOAD_LOCATION, 'r')
+                zip_ref.extractall(BASE_LOCATION)
                 zip_ref.close()
 
+                # Search for yaml file
                 for name in zip_ref.namelist():
                     if name.endswith('.yaml') or name.endswith('.yml'):
                         yaml_file = name
 
                 if yaml_file:
-                    with open(zip_file_extract_location + str(yaml_file), "r") as stream:
-                        yaml_file_content = yaml.load(stream)
+                    with open('{}/{}'.format(BASE_LOCATION, yaml_file), "r") as stream:
+                        yaml_file_data = yaml.load(stream)
 
-                image = yaml_file_content['image']
-                if image.endswith('.jpg') or image.endswith('.jpeg') or image.endswith('png'):
-                    challenge_image_file_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
-                                                                                         image))
+                image = yaml_file_data['image']
+                if image.endswith('.jpg') or image.endswith('.jpeg') or image.endswith('.png'):
+                    challenge_image_path = os.path.join("{}/zip_challenge/{}".format(BASE_LOCATION, image))
+                    if os.path.isfile(challenge_image_path):
+                        challenge_image = open(challenge_image_path, 'rb')
+                        challenge_image_file = File(challenge_image)
+                    else:
+                        challenge_image_file = None
+                else:
+                    challenge_image_file = None
 
-                evaluation_script = yaml_file_content['evaluation_script']
+                evaluation_script = yaml_file_data['evaluation_script']
                 if len(evaluation_script) > 0:
-                    evaluation_script_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
-                                                                                                evaluation_script))
+                    evaluation_script_path = os.path.join("{}/zip_challenge/{}".format(BASE_LOCATION,
+                                                                                      evaluation_script))
 
-                if os.path.isfile(challenge_image_file_path) and os.path.isfile(evaluation_script_path):
-                    image = SimpleUploadedFile(challenge_image_file_path,
-                                               str(yaml_file_content['image']),
-                                               content_type='image/jpeg')
-                    evaluation_script = SimpleUploadedFile(evaluation_script_path,
-                                                           str(yaml_file_content['evaluation_script']),
-                                                           content_type='text/plain')
+                # Check for evaluation script file.
+                if os.path.isfile(evaluation_script_path):
+                    challenge_evaluation_script = open(evaluation_script_path, 'rb')
+                    challenge_evaluation_script_file = File(challenge_evaluation_script)
 
-                serializer = ZipConfigurationChallengeSerializer(data=yaml_file_content,
+                serializer = ZipConfigurationChallengeSerializer(data=yaml_file_data,
                                                                  context={'request': request,
                                                                           'challenge_host_team': challenge_host_team})
+
                 if serializer.is_valid():
                     challenge = serializer.save()
                     challenge_obj = Challenge.objects.get(pk=challenge.pk)
-                    challenge_obj.image = image
-                    challenge_obj.evaluation_script = evaluation_script
-                    challenge_obj.save()
+                    if challenge_image_file is not None:
+                        challenge_obj.image.save(image, challenge_image_file, save=True)
+                    challenge_obj.evaluation_script.save(evaluation_script,
+                                                         challenge_evaluation_script_file,
+                                                         save=True)
 
-                yaml_file_content_of_leaderboard = yaml_file_content['leaderboard']
-                key = 0
+                # Create Leaderboard
+                yaml_file_data_of_leaderboard = yaml_file_data['leaderboard']
                 leaderboard_ids = []
-                while key < len(yaml_file_content_of_leaderboard):
-                    yaml_file_leaderboard_list = yaml_file_content_of_leaderboard[key:key+2]
-                    key += 2
-                    data = {}
-                    for value in yaml_file_leaderboard_list:
-                        data.update(value)
+                for data in yaml_file_data_of_leaderboard:
                     serializer = LeaderboardSerializer(data=data)
                     if serializer.is_valid():
                         leaderboard = serializer.save()
                         leaderboard_ids.append(leaderboard.pk)
 
                 # Create Challenge Phase
-
-                yaml_file_content_of_challenge_phase = yaml_file_content['challenge_phases']
-                key = 0
+                yaml_file_data_of_challenge_phase = yaml_file_data['challenge_phases']
                 challenge_phase_ids = []
-                while key < len(yaml_file_content_of_challenge_phase):
-                    yaml_file_challenge_phase_list = yaml_file_content_of_challenge_phase[key:key+11]
-                    data = {}
-                    for value in yaml_file_challenge_phase_list:
-                        data.update(value)
+                for data in yaml_file_data_of_challenge_phase:
                     serializer = ChallengePhaseSerializer(data=data, context={'challenge': challenge})
                     if serializer.is_valid():
                         challenge_phase = serializer.save()
                         challenge_phase_ids.append(challenge_phase.pk)
-                        challenge_phase = ChallengePhase.objects.get(pk=challenge_phase.pk)
 
-                        test_annotation_file = yaml_file_challenge_phase_list[7]['test_annotation_file']
-                        if len(yaml_file_challenge_phase_list[7]['test_annotation_file']) > 0:
-                            test_annotation_file = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
-                                                                                                 test_annotation_file))
-                        if os.path.isfile(test_annotation_file):
-                            challenge_phase.test_annotation = SimpleUploadedFile(str(data['test_annotation_file']),
-                                                                                 test_annotation_file,
-                                                                                 content_type='text/plain')
-                            challenge_phase.save()
-                    key += 11
+                        test_annotation_file = data['test_annotation_file']
+                        if len(test_annotation_file) > 0:
+                            test_annotation_file_path = os.path.join("{}/zip_challenge/{}".format(BASE_LOCATION,
+                                                                                            test_annotation_file))
+                        if os.path.isfile(test_annotation_file_path):
+                            challenge_test_annotation = open(test_annotation_file_path, 'rb')
+                            challenge_test_annotation_file = File(challenge_test_annotation)
+                            challenge_phase = ChallengePhase.objects.get(pk=challenge_phase.pk)
+                            challenge_phase.test_annotation.save(test_annotation_file,
+                                                                 challenge_test_annotation_file,
+                                                                 save=True)
 
                 # Create Dataset Splits
-
-                yaml_file_content_of_dataset_split = yaml_file_content['dataset_splits']
-                key = 0
+                yaml_file_data_of_dataset_split = yaml_file_data['dataset_splits']
                 dataset_split_ids = []
-                while key < len(yaml_file_content_of_dataset_split):
-                    yaml_file_dataset_split_list = yaml_file_content_of_dataset_split[key:key+3]
-                    key += 3
-                    data = {}
-                    for value in yaml_file_dataset_split_list:
-                        data.update(value)
-
+                for data in yaml_file_data_of_dataset_split:
                     serializer = DatasetSplitSerializer(data=data)
                     if serializer.is_valid():
                         dataset_split = serializer.save()
                         dataset_split_ids.append(dataset_split.pk)
 
                 # Create Challenge Phase Splits
-
-                yaml_file_content_of_challenge_phase_splits = yaml_file_content['challenge_phase_splits']
-                key = 0
-                challenge_phase_split_ids = []
-                while key < len(yaml_file_content_of_challenge_phase_splits):
-                    yaml_file_challenge_phase_split_list = yaml_file_content_of_challenge_phase_splits[key:key+4]
-                    key += 4
-                    temp_data = {}
-                    for value in yaml_file_challenge_phase_split_list:
-                        temp_data.update(value)
-
-                    challenge_phase = str(challenge_phase_ids[int(temp_data['challenge_phase_id'])-1])
-                    leaderboard = str(leaderboard_ids[int(temp_data['leaderboard_id'])-1])
-                    dataset_split = str(dataset_split_ids[int(temp_data['dataset_split_id'])-1])
-                    visibility = int(temp_data['visibility'])
+                yaml_file_data_of_challenge_phase_splits = yaml_file_data['challenge_phase_splits']
+                for data in yaml_file_data_of_challenge_phase_splits:
+                    challenge_phase = challenge_phase_ids[data['challenge_phase_id']-1]
+                    leaderboard = leaderboard_ids[data['leaderboard_id']-1]
+                    dataset_split = dataset_split_ids[data['dataset_split_id']-1]
+                    visibility = data['visibility']
 
                     data = {
                         'challenge_phase': challenge_phase,
@@ -518,22 +499,19 @@ def create_challenge_using_zip_file(request):
                     serializer = ZipFileCreateChallengePhaseSplitSerializer(data=data)
                     if serializer.is_valid():
                         challenge_phase_split = serializer.save()
-                        challenge_phase_split_ids.append(challenge_phase_split)
             zip_config = ChallengeConfiguration.objects.get(pk=uploaded_zip_file.pk)
 
             if zip_config:
                 zip_config.challenge = challenge
                 zip_config.save()
                 response_data = {'success': 'The Challenge is successfully created'}
-                return Response(response_data, status=status.HTTP_200_OK)
-
-    except Exception as e:
-        print e
+                return Response(response_data, status=status.HTTP_201_CREATED)
+    except:
         response_data = {'error': 'Error in challenge creation'}
         return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        os.remove(zip_file_download_location)
-        logger.info('Zip folder is removed')  
+        os.remove(CHALLENGE_ZIP_DOWNLOAD_LOCATION)
+        logger.info('Zip folder is removed')
     except:
         logger.info('Zip folder not removed')
