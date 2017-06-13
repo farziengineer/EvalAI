@@ -1397,7 +1397,7 @@ class GetChallengePhaseSplitTest(BaseChallengePhaseSplitClass):
         self.assertEqual(response.data, expected)
         self.assertEqual(response.status_code, status.HTTP_406_NOT_ACCEPTABLE)
 
-from django.core.files.uploadedfile import SimpleUploadedFile
+
 class CreateChallengeUsingZipFile(APITransactionTestCase):
 
     def setUp(self):
@@ -1421,13 +1421,17 @@ class CreateChallengeUsingZipFile(APITransactionTestCase):
         self.zip_configuration = ChallengeConfiguration.objects.create(
             user=self.user,
             challenge=None,
-            zip_configuration=SimpleUploadedFile('test_sample.zip', 'Dummy file content', content_type='application/zip'),
+            zip_configuration=SimpleUploadedFile('test_sample.zip',
+                                                 'Dummy file content',
+                                                 content_type='application/zip'),
             stdout_file=None,
             stderr_file=None
             )
         self.client.force_authenticate(user=self.user)
 
-        self.input_zip_file = SimpleUploadedFile('test_sample.zip', 'Dummy File Content', content_type='application/zip')
+        self.input_zip_file = SimpleUploadedFile('test_sample.zip',
+                                                 'Dummy File Content',
+                                                 content_type='application/zip')
 
     def test_create_challenge_using_zip_file_when_zip_file_is_not_uploaded(self):
         self.url = reverse_lazy('challenges:create_challenge_using_zip_file')

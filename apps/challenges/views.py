@@ -4,9 +4,8 @@ import requests
 import yaml
 import zipfile
 
-from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import transaction, IntegrityError
+from django.db import transaction
 from django.utils import timezone
 
 from rest_framework import permissions, status
@@ -19,13 +18,13 @@ from rest_framework_expiring_authtoken.authentication import (ExpiringTokenAuthe
 from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 
 from accounts.permissions import HasVerifiedEmail
-from base.utils import paginated_queryset, get_model_object
+from base.utils import paginated_queryset
 from hosts.models import ChallengeHost, ChallengeHostTeam
 from hosts.utils import get_challenge_host_teams_for_user
 from participants.models import Participant, ParticipantTeam
 from participants.utils import get_participant_teams_for_user, has_user_participated_in_challenge
 
-from .models import Challenge, ChallengePhase, ChallengePhaseSplit, ChallengeConfiguration, DatasetSplit, Leaderboard
+from .models import Challenge, ChallengePhase, ChallengePhaseSplit, ChallengeConfiguration
 from .permissions import IsChallengeCreator
 from .serializers import (ChallengeConfigurationSerializer,
                           ChallengePhaseSerializer,
@@ -368,7 +367,7 @@ def create_challenge_using_zip_file(request):
     Creates a challenge using a zip file.
     """
     try:
-       challenge_host_team =  ChallengeHostTeam.objects.get(created_by=request.user.pk)
+        challenge_host_team =  ChallengeHostTeam.objects.get(created_by=request.user.pk)
     except:
         response_data = {'error': 'Challenge Host Team for {} does not exist'.format(request.user)}
         return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
@@ -413,14 +412,14 @@ def create_challenge_using_zip_file(request):
 
                 evaluation_script = yaml_file_content['evaluation_script']
                 if len(evaluation_script) > 0:
-                    challenge_evaluation_script_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
+                    evaluation_script_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
                                                                                                 evaluation_script))
 
-                if os.path.isfile(challenge_image_file_path) and os.path.isfile(challenge_evaluation_script_path):
+                if os.path.isfile(challenge_image_file_path) and os.path.isfile(evaluation_script_path):
                     image = SimpleUploadedFile(challenge_image_file_path,
                                                str(yaml_file_content['image']),
                                                content_type='image/jpeg')
-                    evaluation_script = SimpleUploadedFile(challenge_evaluation_script_path,
+                    evaluation_script = SimpleUploadedFile(evaluation_script_path,
                                                            str(yaml_file_content['evaluation_script']),
                                                            content_type='text/plain')
 
@@ -466,11 +465,11 @@ def create_challenge_using_zip_file(request):
 
                         test_annotation_file = yaml_file_challenge_phase_list[7]['test_annotation_file']
                         if len(yaml_file_challenge_phase_list[7]['test_annotation_file']) > 0:
-                            test_annotation_file_path = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
-                                                                                                 str(test_annotation_file)))
-                        if os.path.isfile(test_annotation_file_path):
+                            test_annotation_file = os.path.join("{}zip_challenge/{}".format(zip_file_extract_location,
+                                                                                                 test_annotation_file))
+                        if os.path.isfile(test_annotation_file):
                             challenge_phase.test_annotation = SimpleUploadedFile(str(data['test_annotation_file']),
-                                                                                 test_annotation_file_path,
+                                                                                 test_annotation_file,
                                                                                  content_type='text/plain')
                             challenge_phase.save()
                     key += 11
