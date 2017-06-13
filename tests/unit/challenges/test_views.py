@@ -12,9 +12,14 @@ from django.utils import timezone
 
 from allauth.account.models import EmailAddress
 from rest_framework import status
-from rest_framework.test import APITestCase, APIClient
+from rest_framework.test import APITestCase, APIClient, APITransactionTestCase
 
-from challenges.models import Challenge, ChallengePhase, DatasetSplit, ChallengePhaseSplit, Leaderboard
+from challenges.models import (Challenge,
+                               ChallengeConfiguration,
+                               ChallengePhase,
+                               ChallengePhaseSplit,
+                               DatasetSplit,
+                               Leaderboard,)
 from participants.models import Participant, ParticipantTeam
 from hosts.models import ChallengeHost, ChallengeHostTeam
 
@@ -1391,3 +1396,75 @@ class GetChallengePhaseSplitTest(BaseChallengePhaseSplitClass):
         response = self.client.get(self.url, {})
         self.assertEqual(response.data, expected)
         self.assertEqual(response.status_code, status.HTTP_406_NOT_ACCEPTABLE)
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+class CreateChallengeUsingZipFile(APITransactionTestCase):
+
+    def setUp(self):
+        self.client = APIClient(enforce_csrf_checks=True)
+
+        self.user = User.objects.create(
+            username='host',
+            email='host@test.com',
+            password='secret_password')
+
+        EmailAddress.objects.create(
+            user=self.user,
+            email='user@test.com',
+            primary=True,
+            verified=True)
+
+        self.challenge_host_team = ChallengeHostTeam.objects.create(
+            team_name='Test Challenge Host Team',
+            created_by=self.user)
+
+        self.zip_configuration = ChallengeConfiguration.objects.create(
+            user=self.user,
+            challenge=None,
+            zip_configuration=SimpleUploadedFile('test_sample.zip', 'Dummy file content', content_type='application/zip'),
+            stdout_file=None,
+            stderr_file=None
+            )
+        self.client.force_authenticate(user=self.user)
+
+        self.input_zip_file = SimpleUploadedFile('test_sample.zip', 'Dummy File Content', content_type='application/zip')
+
+    def test_create_challenge_using_zip_file_when_zip_file_is_not_uploaded(self):
+        self.url = reverse_lazy('challenges:create_challenge_using_zip_file')
+        expected = {
+            'zip_configuration': ['No file was submitted.']
+        }
+        response = self.client.post(self.url, {})
+        self.assertEqual(response.data, expected)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_challenge_using_zip_file_when_zip_file_is_not_uploaded_successfully(self):
+        self.url = reverse_lazy('challenges:create_challenge_using_zip_file')
+        expected = {
+            'zip_configuration': ['The submitted data was not a file. Check the encoding type on the form.']
+        }
+        response = self.client.post(self.url, {'zip_configuration': self.input_zip_file})
+        self.assertEqual(response.data, expected)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_challenge_using_zip_file_when_challenge_host_team_does_not_exists(self):
+        self.url = reverse_lazy('challenges:create_challenge_using_zip_file')
+        self.challenge_host_team.delete()
+        expected = {
+            'error': 'Challenge Host Team for {} does not exist'.format(self.user)
+        }
+        response = self.client.post(self.url, {'zip_configuration': self.input_zip_file}, format='multipart')
+        self.assertEqual(response.data, expected)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_challenge_using_zip_file_when_user_is_not_authenticated(self):
+        self.url = reverse_lazy('challenges:create_challenge_using_zip_file')
+        self.client.force_authenticate(user=None)
+
+        expected = {
+            'error': 'Authentication credentials were not provided.'
+        }
+
+        response = self.client.post(self.url, {})
+        self.assertEqual(response.data.values()[0], expected['error'])
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
