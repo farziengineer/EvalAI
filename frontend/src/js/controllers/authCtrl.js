@@ -24,7 +24,8 @@
         // form error
         vm.isFormError = false;
         vm.FormError = {};
-
+        // to store the next redirect route
+        vm.redirectUrl = {};
 
         // default parameters
         vm.isLoader = false;
@@ -142,8 +143,16 @@
                     onSuccess: function(response) {
                         if (response.status == 200) {
                             utilities.storeData('userKey', response.data.token);
+                            vm.redirectUrl = utilities.getData('redirectUrl');
+                            if( vm.redirectUrl === 'web.challenge-host-teams') {
+                                $state.go('web.challenge-host-teams');
+                                vm.stopLoader();
+                            }
+                            else {
+
                             $state.go('web.dashboard');
                             vm.stopLoader();
+                            }
                         } else {
                             alert("Something went wrong");
                             vm.stopLoader();
