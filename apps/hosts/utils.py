@@ -8,6 +8,6 @@ def get_challenge_host_teams_for_user(user):
 
 
 def is_user_a_host_of_challenge(user, challenge_pk):
-    """Returns boolean if the Participant Team participated in particular Challenge"""
+    """Returns boolean if the Participant participated in particular Challenge"""
     challenge_host_teams = get_challenge_host_teams_for_user(user)
     return Challenge.objects.filter(pk=challenge_pk, creator_id__in=challenge_host_teams).exists()
